@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 type obj = map[string]any
@@ -108,6 +109,41 @@ func TestLocateCodex(t *testing.T) {
 	}
 	if got := Locate("claude", testID, dirs); got != "" {
 		t.Errorf("Locate with no claude dirs = %q, want empty", got)
+	}
+}
+
+func TestLocateByCwd(t *testing.T) {
+	root := t.TempDir()
+	meta := func(cwd string) obj { return obj{"type": "session_meta", "payload": obj{"cwd": cwd}} }
+	write := func(name, cwd string, mod time.Time) string {
+		path := filepath.Join(root, "2026", "09", "24", name)
+		writeJSONL(t, path, meta(cwd), obj{"type": "event_msg"})
+		if err := os.Chtimes(path, mod, mod); err != nil {
+			t.Fatal(err)
+		}
+		return path
+	}
+	now := time.Now()
+	write("rollout-a.jsonl", "/proj", now.Add(-time.Hour))
+	want := write("rollout-b.jsonl", "/proj/", now.Add(-2*time.Minute))
+	write("rollout-c.jsonl", "/other", now.Add(-time.Minute))
+	dirs := Dirs{Codex: []string{root}}
+	since := now.Add(-10 * time.Minute)
+
+	if got := LocateByCwd("codex", "/proj", since, dirs); got != want {
+		t.Errorf("LocateByCwd = %q, want %q", got, want)
+	}
+	if got := LocateByCwd("codex", "/proj", now.Add(-time.Minute-30*time.Second), dirs); got != "" {
+		t.Errorf("LocateByCwd with only stale matches = %q, want empty", got)
+	}
+	if got := LocateByCwd("codex", "/missing", since, dirs); got != "" {
+		t.Errorf("LocateByCwd for unknown cwd = %q, want empty", got)
+	}
+	if got := LocateByCwd("claude", "/proj", since, dirs); got != "" {
+		t.Errorf("LocateByCwd(claude) = %q, want empty", got)
+	}
+	if got := LocateByCwd("codex", "", since, dirs); got != "" {
+		t.Errorf("LocateByCwd with empty cwd = %q, want empty", got)
 	}
 }
 

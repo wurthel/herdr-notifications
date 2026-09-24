@@ -21,7 +21,7 @@ For `blocked`, the message also shows what the agent is waiting for: the command
 
 How the content is found:
 
-- **Claude Code and Codex:** herdr knows each pane's agent session id. The plugin reads that session's log (`~/.claude/projects/*/<id>.jsonl`, `~/.codex/sessions/**/rollout-*-<id>.jsonl`; `CLAUDE_CONFIG_DIR` and `CODEX_HOME` are honoured) and takes the last real prompt, the final response text and any unanswered tool call. Injected messages (task notifications, command caveats, environment context) are skipped. Markdown in the response is converted to Telegram formatting, and the response sits in an expandable quote trimmed to fit Telegram's 4096-character limit.
+- **Claude Code and Codex:** herdr knows each pane's agent session id. The plugin reads that session's log (`~/.claude/projects/*/<id>.jsonl`, `~/.codex/sessions/**/rollout-*-<id>.jsonl`; `CLAUDE_CONFIG_DIR` and `CODEX_HOME` are honoured) and takes the last real prompt, the final response text and any unanswered tool call. herdr does not report a session id for Codex panes, so for Codex the plugin picks the newest log written in the last 10 minutes whose recorded working directory matches the pane's; two Codex panes in the same directory can be confused. Injected messages (task notifications, command caveats, environment context) are skipped. Markdown in the response is converted to Telegram formatting, and the response sits in an expandable quote trimmed to fit Telegram's 4096-character limit.
 - **Other agents, or no log found:** the last `PANE_TAIL_LINES` lines of the pane are sent as a code block, with ANSI codes, TUI borders and repeated blank lines removed.
 
 ## Requirements
@@ -129,7 +129,7 @@ command = "herdr-notifications.toggle"
 
 - **No message arrives.** Run `herdr plugin log list --plugin herdr-notifications`. The event hook always exits 0 and writes errors (missing token, Telegram API errors, pane or transcript read failures) to stderr, which herdr saves in this log.
 - **Every message shows the same old prompt and response.** Claude Code sometimes moves a running session to a new session id, and herdr keeps reporting the old one. The plugin follows the `continued-in` marker Claude Code writes at the end of the old log. If the message is still stale, compare `agent_session.value` from `herdr pane get <pane>` with the newest log in `~/.claude/projects/<project>/`.
-- **Raw terminal output instead of prompt/response.** The agent is not Claude Code or Codex, or its session log was not found. Check `herdr pane get <pane>`: `agent_session.value` must match a log file name.
+- **Raw terminal output instead of prompt/response.** The agent is not Claude Code or Codex, or its session log was not found. Check `herdr pane get <pane>`: for Claude Code, `agent_session.value` must match a log file name; for Codex, the pane's `cwd` must match the `cwd` in the first line of a log under `~/.codex/sessions` written in the last 10 minutes.
 - **Is the plugin loaded?** Run `herdr plugin list`.
 - **"No such file" or exec errors.** Hooks run inside the herdr server, which runs `./herdr-notifications` from the plugin root. That binary must exist there. For a linked checkout, run `make build`.
 - **Unsure what herdr sends.** Set `DEBUG=1` and trigger an event, then read the file it overwrites on each event, `$HERDR_PLUGIN_STATE_DIR/debug/last-event.json`.

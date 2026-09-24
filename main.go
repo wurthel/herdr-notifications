@@ -192,6 +192,10 @@ func busy(status string) bool {
 	return false
 }
 
+// cwdLogMaxAge is how recently a log found by working directory must have
+// been written to count as the pane's current session.
+const cwdLogMaxAge = 10 * time.Minute
+
 // addContext fills msg with the last prompt and response from the agent's
 // transcript, or with the pane's recent output when no transcript is found.
 func (a app) addContext(ctx context.Context, cfg config.Config, cli herdr.CLI, paneID string, pane herdr.Pane, msg *notify.Message) {
@@ -200,7 +204,11 @@ func (a app) addContext(ctx context.Context, cfg config.Config, cli herdr.CLI, p
 		agent = pane.Agent
 	}
 	dirs := a.dirs()
-	if path := transcript.Resolve(agent, transcript.Locate(agent, pane.AgentSession.Value, dirs), dirs); path != "" {
+	path := transcript.Locate(agent, pane.AgentSession.Value, dirs)
+	if path == "" {
+		path = transcript.LocateByCwd(agent, pane.Cwd, a.now().Add(-cwdLogMaxAge), dirs)
+	}
+	if path = transcript.Resolve(agent, path, dirs); path != "" {
 		turn, err := a.readTurn(agent, path, msg.Status)
 		if err != nil {
 			fmt.Fprintln(a.stderr, "herdr-notifications: read transcript:", err)

@@ -13,6 +13,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"time"
 )
 
 // Turn is the latest exchange in a session.
@@ -77,6 +78,66 @@ func Locate(agent, sessionID string, dirs Dirs) string {
 		}
 	}
 	return ""
+}
+
+// maxCwdCandidates bounds how many recent logs LocateByCwd opens.
+const maxCwdCandidates = 32
+
+// LocateByCwd returns the most recently written Codex log started in cwd and
+// modified after since, or "". herdr does not report a session id for Codex
+// panes, so the working directory is the best available link to the log.
+func LocateByCwd(agent, cwd string, since time.Time, dirs Dirs) string {
+	if agent != "codex" || cwd == "" {
+		return ""
+	}
+	cwd = filepath.Clean(cwd)
+	type candidate struct {
+		path string
+		mod  time.Time
+	}
+	var cands []candidate
+	for _, d := range dirs.Codex {
+		matches, _ := filepath.Glob(filepath.Join(d, "*", "*", "*", "rollout-*.jsonl"))
+		for _, m := range matches {
+			if info, err := os.Stat(m); err == nil && info.ModTime().After(since) {
+				cands = append(cands, candidate{m, info.ModTime()})
+			}
+		}
+	}
+	sort.Slice(cands, func(i, j int) bool { return cands[i].mod.After(cands[j].mod) })
+	for i, c := range cands {
+		if i == maxCwdCandidates {
+			break
+		}
+		if codexCwd(c.path) == cwd {
+			return c.path
+		}
+	}
+	return ""
+}
+
+// codexCwd returns the working directory from a Codex log's session_meta
+// header, or "".
+func codexCwd(path string) string {
+	f, err := os.Open(path)
+	if err != nil {
+		return ""
+	}
+	defer f.Close()
+	line, err := bufio.NewReaderSize(f, 64<<10).ReadBytes('\n')
+	if err != nil && err != io.EOF {
+		return ""
+	}
+	var e struct {
+		Type    string `json:"type"`
+		Payload struct {
+			Cwd string `json:"cwd"`
+		} `json:"payload"`
+	}
+	if json.Unmarshal(line, &e) != nil || e.Type != "session_meta" || e.Payload.Cwd == "" {
+		return ""
+	}
+	return filepath.Clean(e.Payload.Cwd)
 }
 
 const (
