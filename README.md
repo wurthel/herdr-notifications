@@ -29,6 +29,17 @@ How the content is found:
 - herdr 0.9.1 or newer (Linux or macOS)
 - Go 1.23 or newer, used to build the binary. There are no dependencies outside the standard library.
 
+## Quick setup
+
+An interactive script installs or uninstalls the plugin. For install it checks the requirements, installs the plugin, asks for the bot token, chat id and settings, writes `.env` and sends a test message. For uninstall it removes the plugin, then (after confirmation) its settings and state.
+
+```sh
+./install.sh                     # from a clone: can link the checkout
+bash <(curl -fsSL https://raw.githubusercontent.com/wurthel/herdr-notifications/main/install.sh)   # without a clone: installs from GitHub
+```
+
+Re-running it keeps the saved values when you press Enter. The manual steps are below.
+
 ## Install
 
 From GitHub:
@@ -135,6 +146,7 @@ make clean
 ```
 .
 ├── herdr-plugin.toml      # manifest: build step, event hook, actions
+├── install.sh             # interactive install / uninstall wizard
 ├── main.go                # CLI entry point: notify | test | toggle
 ├── internal/
 │   ├── config/            # .env + environment loading
