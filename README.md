@@ -1,20 +1,28 @@
 # herdr-notifications
 
-A [herdr](https://herdr.dev) plugin that sends a Telegram message when an agent in a pane finishes (`done`) or needs input (`blocked`). The message includes the last lines of the pane's output, so you can often tell from your phone whether it needs you.
+A [herdr](https://herdr.dev) plugin that sends a Telegram message when an agent in a pane finishes (`done`) or needs input (`blocked`). The message shows your last prompt and the agent's last response, so you can tell from your phone whether it needs you.
 
 Example message:
 
 ```
 ✅ claude finished
 📁 my-project › api
-Fix flaky auth test
 
-$ go test ./...
-ok  	example.com/api/auth	0.412s
-ok  	example.com/api/store	1.037s
+👤 You
+│ Fix the flaky auth test
+
+🤖 claude
+│ Fixed it:
+│ • wait for the server with sync.WaitGroup
+│ • all tests green
 ```
 
-Line 1 is `✅ <agent> finished` or `⏸ <agent> needs input`. Line 2 shows the workspace and tab that contain the pane. Line 3 is the pane title, shown only when it differs from the agent name. The pane tail comes last. It is sent as a `<pre>` block with ANSI codes stripped, and its oldest lines are cut if the message would go over Telegram's 4096-character limit.
+For `blocked`, the message also shows what the agent is waiting for: the command it wants to run, or the question and its options.
+
+How the content is found:
+
+- **Claude Code and Codex:** herdr knows each pane's agent session id. The plugin reads that session's log (`~/.claude/projects/*/<id>.jsonl`, `~/.codex/sessions/**/rollout-*-<id>.jsonl`; `CLAUDE_CONFIG_DIR` and `CODEX_HOME` are honoured) and takes the last real prompt, the final response text and any unanswered tool call. Injected messages (task notifications, command caveats, environment context) are skipped. Markdown in the response is converted to Telegram formatting, and the response sits in an expandable quote trimmed to fit Telegram's 4096-character limit.
+- **Other agents, or no log found:** the last `PANE_TAIL_LINES` lines of the pane are sent as a code block, with ANSI codes, TUI borders and repeated blank lines removed.
 
 ## Requirements
 
@@ -63,7 +71,7 @@ To remove a linked plugin, run `make unlink`.
 | `TELEGRAM_BOT_TOKEN` | (required) | Bot token from @BotFather |
 | `TELEGRAM_CHAT_ID` | (required) | Chat to send messages to |
 | `NOTIFY_ON` | `done,blocked` | Comma-separated statuses that trigger a message: `idle`, `working`, `blocked`, `done` |
-| `PANE_TAIL_LINES` | `15` | Number of pane output lines to include (max `200`). `0` disables the tail. |
+| `PANE_TAIL_LINES` | `15` | Pane output lines to send when no agent transcript is available (max `200`). `0` disables this fallback. |
 | `NOTIFY_IDLE_AFTER_WORKING` | `1` | Treat `working → idle` as `done` (the agent finished in a visible pane). Needs `done` in `NOTIFY_ON`. `0` disables. |
 | `DEBOUNCE_SECONDS` | `10` | Minimum seconds between two messages for the same status on the same pane |
 | `DEBUG` | `0` | `1`/`true` writes the latest event to `$HERDR_PLUGIN_STATE_DIR/debug/last-event.json` |
@@ -105,7 +113,8 @@ command = "herdr-notifications.toggle"
 
 ## Troubleshooting
 
-- **No message arrives.** Run `herdr plugin log list --plugin herdr-notifications`. The event hook always exits 0 and writes errors (missing token, Telegram API errors, pane read failures) to stderr, which herdr saves in this log.
+- **No message arrives.** Run `herdr plugin log list --plugin herdr-notifications`. The event hook always exits 0 and writes errors (missing token, Telegram API errors, pane or transcript read failures) to stderr, which herdr saves in this log.
+- **Raw terminal output instead of prompt/response.** The agent is not Claude Code or Codex, or its session log was not found. Check `herdr pane get <pane>`: `agent_session.value` must match a log file name.
 - **Is the plugin loaded?** Run `herdr plugin list`.
 - **"No such file" or exec errors.** Hooks run inside the herdr server, which runs `./herdr-notifications` from the plugin root. That binary must exist there. For a linked checkout, run `make build`.
 - **Unsure what herdr sends.** Set `DEBUG=1` and trigger an event, then read the file it overwrites on each event, `$HERDR_PLUGIN_STATE_DIR/debug/last-event.json`.
@@ -130,8 +139,9 @@ make clean
 ├── internal/
 │   ├── config/            # .env + environment loading
 │   ├── event/             # parses HERDR_PLUGIN_EVENT_JSON / CONTEXT_JSON
-│   ├── herdr/             # herdr CLI calls (pane read, notification show)
-│   ├── notify/            # notification decision + message formatting
+│   ├── herdr/             # herdr CLI calls (pane get/read, notification show)
+│   ├── notify/            # notification decision, message layout, Markdown → HTML
+│   ├── transcript/        # Claude Code / Codex session log parsing
 │   ├── state/             # per-pane state, mute flag, file locking
 │   └── telegram/          # Bot API client
 ├── .env.example

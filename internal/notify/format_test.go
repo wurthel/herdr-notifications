@@ -250,3 +250,276 @@ func TestMessageTruncationCountsUTF16(t *testing.T) {
 		}
 	}
 }
+
+func TestMessageHTMLWithTurn(t *testing.T) {
+	base := Message{
+		Agent:   "Agent",
+		Prompt:  "  fix <the> bug & ship  ",
+		Output:  "Done **now**:\n- `main.go` fixed",
+		Pending: "Bash: rm -rf <build>",
+		Tail:    "raw pane output",
+	}
+	done := base
+	done.Status = "done"
+	blocked := base
+	blocked.Status = "blocked"
+	tests := []struct {
+		name string
+		msg  Message
+		want string
+	}{
+		{
+			name: "done hides pending",
+			msg:  done,
+			want: "✅ <b>Agent</b> finished\n\n" +
+				"👤 <b>You</b>\n<blockquote>fix &lt;the&gt; bug &amp; ship</blockquote>\n\n" +
+				"🤖 <b>Agent</b>\n<blockquote expandable>Done <b>now</b>:\n• <code>main.go</code> fixed</blockquote>",
+		},
+		{
+			name: "blocked shows pending",
+			msg:  blocked,
+			want: "⏸ <b>Agent</b> needs input\n\n" +
+				"👤 <b>You</b>\n<blockquote>fix &lt;the&gt; bug &amp; ship</blockquote>\n\n" +
+				"🤖 <b>Agent</b>\n<blockquote expandable>Done <b>now</b>:\n• <code>main.go</code> fixed</blockquote>\n\n" +
+				"❓ <b>Waiting for</b>\n<blockquote>Bash: rm -rf &lt;build&gt;</blockquote>",
+		},
+		{
+			name: "output only",
+			msg:  Message{Status: "done", Agent: "Agent", Output: "ok"},
+			want: "✅ <b>Agent</b> finished\n\n🤖 <b>Agent</b>\n<blockquote expandable>ok</blockquote>",
+		},
+		{
+			name: "prompt only",
+			msg:  Message{Status: "done", Agent: "Agent", Prompt: "hi"},
+			want: "✅ <b>Agent</b> finished\n\n👤 <b>You</b>\n<blockquote>hi</blockquote>",
+		},
+		{
+			name: "pending only while blocked",
+			msg:  Message{Status: "blocked", Agent: "Agent", Pending: "Plan approval"},
+			want: "⏸ <b>Agent</b> needs input\n\n❓ <b>Waiting for</b>\n<blockquote>Plan approval</blockquote>",
+		},
+		{
+			name: "blank turn falls back to tail",
+			msg:  Message{Status: "done", Agent: "Agent", Prompt: "  ", Output: "\n\t", Pending: " ", Tail: "a < b\n"},
+			want: "✅ <b>Agent</b> finished\n\n<pre>a &lt; b</pre>",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := tt.msg.HTML()
+			if got != tt.want {
+				t.Errorf("HTML() =\n%q\nwant\n%q", got, tt.want)
+			}
+			checkBalanced(t, got)
+		})
+	}
+}
+
+func TestMessagePlainWithTurn(t *testing.T) {
+	m := Message{
+		Status: "blocked", Agent: "Agent",
+		Prompt: "fix <bug>", Output: "Done **now**", Pending: "Bash: ls", Tail: "ignored",
+	}
+	want := "⏸ Agent needs input\n\n👤 You:\nfix <bug>\n\n🤖 Agent:\nDone **now**\n\n❓ Waiting for:\nBash: ls"
+	if got := m.Plain(); got != want {
+		t.Errorf("Plain() =\n%q\nwant\n%q", got, want)
+	}
+	m.Status = "done"
+	want = "✅ Agent finished\n\n👤 You:\nfix <bug>\n\n🤖 Agent:\nDone **now**"
+	if got := m.Plain(); got != want {
+		t.Errorf("Plain() done =\n%q\nwant\n%q", got, want)
+	}
+	m = Message{Status: "done", Agent: "Agent", Output: " ", Tail: "tail"}
+	if got, want := m.Plain(), "✅ Agent finished\n\ntail"; got != want {
+		t.Errorf("Plain() fallback = %q, want %q", got, want)
+	}
+}
+
+func TestMessagePromptAndPendingClipped(t *testing.T) {
+	m := Message{
+		Status: "blocked", Agent: "A",
+		Prompt:  strings.Repeat("p", 1000),
+		Pending: strings.Repeat("w", 2000),
+		Output:  "ok",
+	}
+	wantPrompt := strings.Repeat("p", maxPromptLen-1) + "…"
+	wantPending := strings.Repeat("w", maxPendingLen-1) + "…"
+	got := m.HTML()
+	if !strings.Contains(got, "<blockquote>"+wantPrompt+"</blockquote>") {
+		t.Errorf("prompt not clipped to %d runes", maxPromptLen)
+	}
+	if !strings.Contains(got, "<blockquote>"+wantPending+"</blockquote>") {
+		t.Errorf("pending not clipped to %d runes", maxPendingLen)
+	}
+	plain := m.Plain()
+	if !strings.Contains(plain, "👤 You:\n"+wantPrompt+"\n") || !strings.Contains(plain, "❓ Waiting for:\n"+wantPending) {
+		t.Errorf("Plain() did not clip prompt/pending")
+	}
+	if n := utf8.RuneCountInString(clip(strings.Repeat("ж", 1000), maxPromptLen)); n != maxPromptLen {
+		t.Errorf("clip rune count = %d, want %d", n, maxPromptLen)
+	}
+}
+
+func hugeMarkdown() string {
+	var b strings.Builder
+	for i := 0; b.Len() < 20000; i++ {
+		fmt.Fprintf(&b, "## Step %d 🚀\n\n", i)
+		fmt.Fprintf(&b, "Changed **file_%d.go** & fixed `a < b` in [docs](https://x.test/%d?a=1&b=2) 🔥🔥.\n", i, i)
+		b.WriteString("- item one\n  - item two with __dunder__\n\n")
+		b.WriteString("```go\nif x < y && y > z {\n\treturn \"**not bold**\" // 🎉\n}\n```\n\n")
+	}
+	return b.String()
+}
+
+// stripClosing removes trailing closing tags.
+func stripClosing(s string) string {
+	for {
+		i := strings.LastIndex(s, "</")
+		if i < 0 || !strings.HasSuffix(s, ">") || strings.Contains(s[i:], "\n") {
+			return s
+		}
+		s = s[:i]
+	}
+}
+
+func TestMessageHugeOutputFits(t *testing.T) {
+	out := hugeMarkdown()
+	for _, status := range []string{"done", "blocked"} {
+		t.Run(status, func(t *testing.T) {
+			m := Message{
+				Status: status, Agent: "Claude Code", Title: "big task", Workspace: "api", Tab: "main",
+				Prompt: strings.Repeat("please do it 🙏 ", 100), Output: out, Pending: "Bash: go test ./...",
+			}
+			got := m.HTML()
+			if n := textLen(got); n > MaxMessageLen {
+				t.Fatalf("HTML UTF-16 length = %d, want <= %d", n, MaxMessageLen)
+			}
+			if n := textLen(got); n < MaxMessageLen-300 {
+				t.Errorf("HTML UTF-16 length = %d, expected close to %d", n, MaxMessageLen)
+			}
+			checkBalanced(t, got)
+			if strings.Contains(got, "\x00") {
+				t.Errorf("placeholder leaked into output")
+			}
+			start := strings.Index(got, "<blockquote expandable>")
+			if start < 0 {
+				t.Fatalf("no output section: %.300q", got)
+			}
+			end := start + strings.Index(got[start:], "</blockquote>")
+			section := got[start : end+len("</blockquote>")]
+			if !strings.HasSuffix(stripClosing(section), "…") {
+				t.Errorf("output not truncated with …: ...%q", section[max(0, len(section)-80):])
+			}
+			if status == "blocked" {
+				if !strings.HasSuffix(got, "❓ <b>Waiting for</b>\n<blockquote>Bash: go test ./...</blockquote>") {
+					t.Errorf("pending missing or not last: ...%q", got[max(0, len(got)-120):])
+				}
+			} else if end+len("</blockquote>") != len(got) {
+				t.Errorf("message does not end with output </blockquote>: ...%q", got[max(0, len(got)-80):])
+			}
+			if !strings.Contains(got, "👤 <b>You</b>\n<blockquote>") {
+				t.Errorf("prompt section missing")
+			}
+
+			plain := m.Plain()
+			if n := textLen(plain); n > MaxMessageLen {
+				t.Fatalf("Plain UTF-16 length = %d, want <= %d", n, MaxMessageLen)
+			}
+			for _, want := range []string{"👤 You:\n", "🤖 Claude Code:\n", " …"} {
+				if !strings.Contains(plain, want) {
+					t.Errorf("Plain missing %q", want)
+				}
+			}
+			if hasPending := strings.Contains(plain, "❓ Waiting for:\nBash: go test ./..."); hasPending != (status == "blocked") {
+				t.Errorf("Plain pending present = %v for status %s", hasPending, status)
+			}
+			if strings.Contains(plain, "<b>") || strings.Contains(plain, "<blockquote") {
+				t.Errorf("Plain contains tags")
+			}
+		})
+	}
+}
+
+func TestMessageEmojiHeavySectionsFit(t *testing.T) {
+	m := Message{Status: "done", Agent: "A", Title: strings.Repeat("🔥", 5000), Workspace: strings.Repeat("🔥", 5000), Tab: strings.Repeat("🔥", 5000),
+		Prompt: strings.Repeat("🔥", 5000), Output: strings.Repeat("x", 5000)}
+	for _, got := range []string{m.HTML(), m.Plain()} {
+		if n := textLen(got); n > MaxMessageLen {
+			t.Errorf("UTF-16 length = %d, want <= %d", n, MaxMessageLen)
+		}
+	}
+	checkBalanced(t, m.HTML())
+}
+
+func TestFitRenderedKeepsMarkerAtFence(t *testing.T) {
+	tests := []struct {
+		name string
+		src  string
+		cut  int
+	}{
+		{"cut after opening fence", strings.Repeat("word ", 100) + "\n```go\n" + strings.Repeat("x", 2000), 600},
+		{"cut after closing fence", "intro text here\n```\ncode line\n```\n" + strings.Repeat("y", 3000), 40},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			budget := textLen(markdownToHTML(cutPrefix([]rune(tt.src), tt.cut))) + 3
+			got, ok := fitRendered(tt.src, budget, markdownToHTML)
+			if !ok {
+				t.Fatal("fitRendered failed")
+			}
+			if textLen(got) > budget {
+				t.Errorf("length %d exceeds budget %d", textLen(got), budget)
+			}
+			if !strings.Contains(got, "…") {
+				t.Errorf("truncation marker lost: %q", got)
+			}
+			checkBalanced(t, got)
+		})
+	}
+}
+
+func TestFitRenderedEveryBudgetBalanced(t *testing.T) {
+	src := string([]rune(hugeMarkdown())[:3000])
+	full := textLen(markdownToHTML(src))
+	for budget := 0; budget <= full+10; budget += 7 {
+		got, ok := fitRendered(src, budget, markdownToHTML)
+		if !ok {
+			continue
+		}
+		if textLen(got) > budget {
+			t.Fatalf("budget %d: length %d", budget, textLen(got))
+		}
+		checkBalanced(t, got)
+		if t.Failed() {
+			t.Fatalf("budget %d: %q", budget, got)
+		}
+	}
+}
+
+func TestCleanTailDecoration(t *testing.T) {
+	tests := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"box rule", "text\n────────\nmore", "text\nmore"},
+		{"underscores", "a\n______\nb", "a\nb"},
+		{"heavy rule", "a\n━━━\nb", "a\nb"},
+		{"indented rule", "a\n   ─────   \nb", "a\nb"},
+		{"box corners", "╭──────╮\n│ hi │\n╰──────╯", "│ hi │"},
+		{"dashes and equals", "a\n- - -\n===\n~~~\nb", "a\nb"},
+		{"text with dash kept", "a - b\nfoo -- bar", "a - b\nfoo -- bar"},
+		{"two dashes kept", "--", "--"},
+		{"markdown bullet kept", "- item", "- item"},
+		{"blank runs collapsed", "a\n\n\n\nb", "a\n\nb"},
+		{"rule between blanks collapsed", "a\n\n───\n\nb", "a\n\nb"},
+		{"input box", "❯ \n────────────\n  ? for shortcuts", "❯\n  ? for shortcuts"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := CleanTail(tt.in); got != tt.want {
+				t.Errorf("CleanTail(%q) = %q, want %q", tt.in, got, tt.want)
+			}
+		})
+	}
+}

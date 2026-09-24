@@ -19,6 +19,7 @@ import (
 	"github.com/wurthel/herdr-notifications/internal/notify"
 	"github.com/wurthel/herdr-notifications/internal/state"
 	"github.com/wurthel/herdr-notifications/internal/telegram"
+	"github.com/wurthel/herdr-notifications/internal/transcript"
 )
 
 const usage = "usage: herdr-notifications [notify|test|toggle]"
@@ -29,6 +30,8 @@ type app struct {
 	stdout io.Writer
 	stderr io.Writer
 	http   *http.Client
+	// sleepFn replaces time.Sleep in tests.
+	sleepFn func(time.Duration)
 }
 
 func main() {
@@ -125,15 +128,7 @@ func (a app) notify(ctx context.Context) error {
 		Workspace: info.WorkspaceLabel,
 		Tab:       info.TabLabel,
 	}
-	if cfg.PaneTailLines > 0 {
-		cli := herdr.CLI{Bin: cfg.HerdrBin}
-		tail, err := cli.ReadTail(ctx, info.PaneID, cfg.PaneTailLines)
-		if err != nil {
-			fmt.Fprintln(a.stderr, "herdr-notifications: read pane tail:", err)
-			tail = ""
-		}
-		msg.Tail = tail
-	}
+	a.addContext(ctx, cfg, info.PaneID, &msg)
 	sendErr := a.telegram(cfg).SendHTML(ctx, cfg.ChatID, msg.HTML(), msg.Plain())
 	if sendErr != nil {
 		if err := rollback(store, info.PaneID, info.Status, notifyAs, prevStatus, now); err != nil {
@@ -141,6 +136,66 @@ func (a app) notify(ctx context.Context) error {
 		}
 	}
 	return sendErr
+}
+
+// addContext fills msg with the last prompt and response from the agent's
+// transcript, or with the pane's recent output when no transcript is found.
+func (a app) addContext(ctx context.Context, cfg config.Config, paneID string, msg *notify.Message) {
+	cli := herdr.CLI{Bin: cfg.HerdrBin}
+	pane, err := cli.PaneInfo(ctx, paneID)
+	if err != nil {
+		fmt.Fprintln(a.stderr, "herdr-notifications: pane info:", err)
+	}
+	agent := pane.AgentSession.Agent
+	if agent == "" {
+		agent = pane.Agent
+	}
+	if path := transcript.Locate(agent, pane.AgentSession.Value, a.dirs()); path != "" {
+		turn, err := a.readTurn(agent, path, msg.Status)
+		if err != nil {
+			fmt.Fprintln(a.stderr, "herdr-notifications: read transcript:", err)
+		}
+		msg.Prompt, msg.Output, msg.Pending = turn.Prompt, turn.Output, turn.Pending
+		if msg.HasTurn() {
+			return
+		}
+	}
+	if cfg.PaneTailLines > 0 {
+		tail, err := cli.ReadTail(ctx, paneID, cfg.PaneTailLines)
+		if err != nil {
+			fmt.Fprintln(a.stderr, "herdr-notifications: read pane tail:", err)
+			tail = ""
+		}
+		msg.Tail = tail
+	}
+}
+
+// readTurn retries briefly when a finished turn has no response yet, since
+// herdr can report done a moment before the agent flushes its transcript.
+func (a app) readTurn(agent, path, status string) (transcript.Turn, error) {
+	for attempt := 0; ; attempt++ {
+		turn, err := transcript.Read(agent, path)
+		if err != nil || status != "done" || turn.Output != "" || attempt == 3 {
+			return turn, err
+		}
+		a.sleep(250 * time.Millisecond)
+	}
+}
+
+func (a app) dirs() transcript.Dirs {
+	home := a.getenv("HOME")
+	if home == "" {
+		home, _ = os.UserHomeDir()
+	}
+	return transcript.DefaultDirs(a.getenv, home)
+}
+
+func (a app) sleep(d time.Duration) {
+	if a.sleepFn != nil {
+		a.sleepFn(d)
+		return
+	}
+	time.Sleep(d)
 }
 
 // rollback undoes a notification that failed to send so the next event with

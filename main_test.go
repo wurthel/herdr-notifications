@@ -62,12 +62,46 @@ type harness struct {
 	clock    time.Time
 	stdout   bytes.Buffer
 	stderr   bytes.Buffer
+	sleeps   int
 }
+
+// writeClaudeTranscript stores JSONL entries where the plugin looks for the
+// test session's Claude Code transcript.
+func (h *harness) writeClaudeTranscript(entries ...map[string]any) {
+	h.t.Helper()
+	dir := filepath.Join(h.env["HOME"], ".claude", "projects", "-work-proj")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		h.t.Fatal(err)
+	}
+	var buf bytes.Buffer
+	for _, e := range entries {
+		line, err := json.Marshal(e)
+		if err != nil {
+			h.t.Fatal(err)
+		}
+		buf.Write(line)
+		buf.WriteByte('\n')
+	}
+	if err := os.WriteFile(filepath.Join(dir, testSessionID+".jsonl"), buf.Bytes(), 0o600); err != nil {
+		h.t.Fatal(err)
+	}
+}
+
+func userEntry(text string) map[string]any {
+	return map[string]any{"type": "user", "message": map[string]any{"role": "user", "content": text}}
+}
+
+func assistantEntry(id string, blocks ...map[string]any) map[string]any {
+	return map[string]any{"type": "assistant", "message": map[string]any{"id": id, "role": "assistant", "content": blocks}}
+}
+
+const testSessionID = "sess-0001-test"
 
 const fakeHerdrScript = `#!/bin/sh
 printf '%%s\n' "$*" >> '%s'
-case "$1" in
-pane) printf '\033[32mcompiling\033[0m\nall <tests> & checks passed\r\n\n' ;;
+case "$1 $2" in
+"pane get") printf '{"result":{"pane":{"pane_id":"%%s","agent":"claude","agent_session":{"agent":"claude","kind":"id","value":"` + testSessionID + `"}}}}' "$3" ;;
+"pane read") printf '\033[32mcompiling\033[0m\nall <tests> & checks passed\r\n\n' ;;
 esac
 exit %d
 `
@@ -85,6 +119,7 @@ func newHarness(t *testing.T) *harness {
 	t.Cleanup(srv.Close)
 
 	h.env = map[string]string{
+		"HOME":                      filepath.Join(dir, "home"),
 		"HERDR_PLUGIN_CONFIG_DIR":   filepath.Join(dir, "config"),
 		"HERDR_PLUGIN_STATE_DIR":    filepath.Join(dir, "state"),
 		"HERDR_BIN_PATH":            h.writeHerdr(dir, 0),
@@ -114,10 +149,11 @@ func (h *harness) run(args ...string) int {
 	h.stdout.Reset()
 	h.stderr.Reset()
 	a := app{
-		getenv: func(k string) string { return h.env[k] },
-		now:    func() time.Time { return h.clock },
-		stdout: &h.stdout,
-		stderr: &h.stderr,
+		getenv:  func(k string) string { return h.env[k] },
+		now:     func() time.Time { return h.clock },
+		stdout:  &h.stdout,
+		stderr:  &h.stderr,
+		sleepFn: func(time.Duration) { h.sleeps++ },
 	}
 	return a.run(args)
 }
@@ -172,8 +208,86 @@ func TestNotifyDoneSendsMessage(t *testing.T) {
 		}
 	}
 	calls := h.herdrCalls()
-	if want := []string{"pane read w1:p1 --source recent-unwrapped --lines 15"}; strings.Join(calls, "|") != strings.Join(want, "|") {
+	if want := []string{"pane get w1:p1", "pane read w1:p1 --source recent-unwrapped --lines 15"}; strings.Join(calls, "|") != strings.Join(want, "|") {
 		t.Errorf("herdr calls = %q, want %q", calls, want)
+	}
+}
+
+func TestNotifyUsesTranscript(t *testing.T) {
+	h := newHarness(t)
+	h.writeClaudeTranscript(
+		userEntry("old question"),
+		assistantEntry("m0", map[string]any{"type": "text", "text": "old answer"}),
+		userEntry("Fix the **flaky** test <please>"),
+		assistantEntry("m1", map[string]any{"type": "tool_use", "id": "t1", "name": "Bash", "input": map[string]any{"command": "go test"}}),
+		map[string]any{"type": "user", "message": map[string]any{"role": "user", "content": []map[string]any{{"type": "tool_result", "tool_use_id": "t1"}}}},
+		assistantEntry("m2", map[string]any{"type": "text", "text": "Fixed it:\n- use `sync.WaitGroup`\n- **all green**"}),
+	)
+	h.notify("working")
+	h.notify("done")
+	msgs := h.tg.messages()
+	if len(msgs) != 1 {
+		t.Fatalf("sent %d messages, want 1 (stderr %q)", len(msgs), h.stderr.String())
+	}
+	for _, want := range []string{
+		"✅ <b>Claude Code</b> finished",
+		"👤 <b>You</b>\n<blockquote>Fix the **flaky** test &lt;please&gt;</blockquote>",
+		"🤖 <b>Claude Code</b>\n<blockquote expandable>Fixed it:\n• use <code>sync.WaitGroup</code>\n• <b>all green</b></blockquote>",
+	} {
+		if !strings.Contains(msgs[0].Text, want) {
+			t.Errorf("message missing %q:\n%s", want, msgs[0].Text)
+		}
+	}
+	for _, unwanted := range []string{"old answer", "<pre>", "Waiting for"} {
+		if strings.Contains(msgs[0].Text, unwanted) {
+			t.Errorf("message contains %q:\n%s", unwanted, msgs[0].Text)
+		}
+	}
+	if calls := h.herdrCalls(); strings.Join(calls, "|") != "pane get w1:p1" {
+		t.Errorf("herdr calls = %q, want only pane get", calls)
+	}
+}
+
+func TestNotifyBlockedShowsPendingTool(t *testing.T) {
+	h := newHarness(t)
+	h.writeClaudeTranscript(
+		userEntry("clean up"),
+		assistantEntry("m1",
+			map[string]any{"type": "text", "text": "I'll remove the build dir."},
+			map[string]any{"type": "tool_use", "id": "t1", "name": "Bash", "input": map[string]any{"command": "rm -rf build"}}),
+	)
+	h.notify("working")
+	h.notify("blocked")
+	msgs := h.tg.messages()
+	if len(msgs) != 1 {
+		t.Fatalf("sent %d messages, want 1", len(msgs))
+	}
+	for _, want := range []string{
+		"⏸ <b>Claude Code</b> needs input",
+		"<blockquote>clean up</blockquote>",
+		"I&#39;ll remove the build dir.",
+		"❓ <b>Waiting for</b>\n<blockquote>Bash: rm -rf build</blockquote>",
+	} {
+		if !strings.Contains(msgs[0].Text, want) {
+			t.Errorf("message missing %q:\n%s", want, msgs[0].Text)
+		}
+	}
+	if h.sleeps != 0 {
+		t.Errorf("blocked waited %d times for the transcript", h.sleeps)
+	}
+}
+
+func TestNotifyDoneWaitsForTranscriptFlush(t *testing.T) {
+	h := newHarness(t)
+	h.writeClaudeTranscript(userEntry("question without answer yet"))
+	h.notify("working")
+	h.notify("done")
+	if h.sleeps != 3 {
+		t.Errorf("sleeps = %d, want 3 retries", h.sleeps)
+	}
+	msgs := h.tg.messages()
+	if len(msgs) != 1 || !strings.Contains(msgs[0].Text, "question without answer yet") {
+		t.Fatalf("messages = %+v", msgs)
 	}
 }
 
@@ -300,8 +414,8 @@ func TestNotifyConfigFromEnvFile(t *testing.T) {
 	if strings.Contains(msgs[0].Text, "<pre>") {
 		t.Errorf("PANE_TAIL_LINES=0 still included a tail: %q", msgs[0].Text)
 	}
-	if calls := h.herdrCalls(); len(calls) != 0 {
-		t.Errorf("herdr called with PANE_TAIL_LINES=0: %q", calls)
+	if calls := h.herdrCalls(); strings.Join(calls, "|") != "pane get w1:p1" {
+		t.Errorf("herdr calls with PANE_TAIL_LINES=0 = %q, want only pane get", calls)
 	}
 }
 
