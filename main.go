@@ -103,12 +103,30 @@ func (a app) notify(ctx context.Context) error {
 		return err
 	}
 
+	cli := herdr.CLI{Bin: cfg.HerdrBin}
+	rules := notify.Rules{NotifyOn: cfg.NotifyOn, Debounce: cfg.Debounce, IdleAfterWorking: cfg.IdleAfterWorking}
+	var (
+		pane     herdr.Pane
+		paneErr  error
+		havePane bool
+	)
+	// herdr can report idle for a moment when a tool call starts. Waiting
+	// outside the state lock lets the following "working" event land first,
+	// and the re-read status then shows the idle was not a real finish.
+	if cfg.Settle > 0 && mayFinish(info.Status, rules) {
+		a.sleep(cfg.Settle)
+		pane, paneErr = cli.PaneInfo(ctx, info.PaneID)
+		havePane = true
+		if paneErr == nil && busy(pane.AgentStatus) {
+			return nil
+		}
+	}
+
 	var (
 		notifyAs   string
 		prevStatus string
 		now        = a.now()
 	)
-	rules := notify.Rules{NotifyOn: cfg.NotifyOn, Debounce: cfg.Debounce, IdleAfterWorking: cfg.IdleAfterWorking}
 	err = store.Update(info.PaneID, func(prev state.PaneState) state.PaneState {
 		next, as := notify.Decide(prev, info.Status, now, rules)
 		notifyAs, prevStatus = as, prev.Status
@@ -121,6 +139,12 @@ func (a app) notify(ctx context.Context) error {
 		return nil
 	}
 
+	if !havePane {
+		pane, paneErr = cli.PaneInfo(ctx, info.PaneID)
+	}
+	if paneErr != nil {
+		fmt.Fprintln(a.stderr, "herdr-notifications: pane info:", paneErr)
+	}
 	msg := notify.Message{
 		Status:    notifyAs,
 		Agent:     info.Agent,
@@ -128,29 +152,55 @@ func (a app) notify(ctx context.Context) error {
 		Workspace: info.WorkspaceLabel,
 		Tab:       info.TabLabel,
 	}
-	a.addContext(ctx, cfg, info.PaneID, &msg)
+	a.addContext(ctx, cfg, cli, info.PaneID, pane, &msg)
+
+	c := claim{paneID: info.PaneID, status: info.Status, as: notifyAs, prevStatus: prevStatus, at: now}
+	if notifyAs == notify.StatusDone {
+		dup, err := c.recordTurn(store, msg.Fingerprint())
+		if err != nil {
+			fmt.Fprintln(a.stderr, "herdr-notifications: record turn:", err)
+		}
+		if dup {
+			if err := c.undo(store, false); err != nil {
+				fmt.Fprintln(a.stderr, "herdr-notifications: undo duplicate:", err)
+			}
+			return nil
+		}
+	}
 	sendErr := a.telegram(cfg).SendHTML(ctx, cfg.ChatID, msg.HTML(), msg.Plain())
 	if sendErr != nil {
-		if err := rollback(store, info.PaneID, info.Status, notifyAs, prevStatus, now); err != nil {
+		if err := c.undo(store, true); err != nil {
 			fmt.Fprintln(a.stderr, "herdr-notifications: rollback state:", err)
 		}
 	}
 	return sendErr
 }
 
+// mayFinish reports whether an event with status can be reported as done.
+func mayFinish(status string, r notify.Rules) bool {
+	if !r.NotifyOn[notify.StatusDone] {
+		return false
+	}
+	return status == notify.StatusDone || (status == notify.StatusIdle && r.IdleAfterWorking)
+}
+
+func busy(status string) bool {
+	switch strings.ToLower(status) {
+	case notify.StatusWorking, "blocked":
+		return true
+	}
+	return false
+}
+
 // addContext fills msg with the last prompt and response from the agent's
 // transcript, or with the pane's recent output when no transcript is found.
-func (a app) addContext(ctx context.Context, cfg config.Config, paneID string, msg *notify.Message) {
-	cli := herdr.CLI{Bin: cfg.HerdrBin}
-	pane, err := cli.PaneInfo(ctx, paneID)
-	if err != nil {
-		fmt.Fprintln(a.stderr, "herdr-notifications: pane info:", err)
-	}
+func (a app) addContext(ctx context.Context, cfg config.Config, cli herdr.CLI, paneID string, pane herdr.Pane, msg *notify.Message) {
 	agent := pane.AgentSession.Agent
 	if agent == "" {
 		agent = pane.Agent
 	}
-	if path := transcript.Locate(agent, pane.AgentSession.Value, a.dirs()); path != "" {
+	dirs := a.dirs()
+	if path := transcript.Resolve(agent, transcript.Locate(agent, pane.AgentSession.Value, dirs), dirs); path != "" {
 		turn, err := a.readTurn(agent, path, msg.Status)
 		if err != nil {
 			fmt.Fprintln(a.stderr, "herdr-notifications: read transcript:", err)
@@ -198,23 +248,62 @@ func (a app) sleep(d time.Duration) {
 	time.Sleep(d)
 }
 
-// rollback undoes a notification that failed to send so the next event with
-// the same status retries it, unless another event has moved the pane on.
-func rollback(store state.Store, paneID, status, notifiedAs, prevStatus string, notifiedAt time.Time) error {
-	return store.Update(paneID, func(cur state.PaneState) state.PaneState {
-		if cur.Status != status || !cur.LastNotified[notifiedAs].Equal(notifiedAt) {
+// claim is a notification recorded in the pane state before it is sent.
+type claim struct {
+	paneID, status, as, prevStatus string
+	at                             time.Time
+	// turn is the fingerprint recorded for this notification, prevTurn the
+	// one it replaced.
+	turn, prevTurn string
+}
+
+// recordTurn stores the fingerprint of the turn about to be sent and reports
+// whether it is the one already sent last time.
+func (c *claim) recordTurn(store state.Store, fp string) (dup bool, err error) {
+	if fp == "" {
+		return false, nil
+	}
+	err = store.Update(c.paneID, func(cur state.PaneState) state.PaneState {
+		if cur.LastTurn[c.as] == fp {
+			dup = true
 			return cur
 		}
-		last := make(map[string]time.Time, len(cur.LastNotified))
-		for k, v := range cur.LastNotified {
-			if k != notifiedAs {
-				last[k] = v
+		c.turn, c.prevTurn = fp, cur.LastTurn[c.as]
+		if cur.LastTurn == nil {
+			cur.LastTurn = map[string]string{}
+		}
+		cur.LastTurn[c.as] = fp
+		return cur
+	})
+	return dup, err
+}
+
+// undo forgets a notification that was not delivered, unless a newer one has
+// replaced it. With restoreStatus it also rewinds the pane's status, if no
+// other event has moved it on, so the next event with that status retries.
+func (c claim) undo(store state.Store, restoreStatus bool) error {
+	return store.Update(c.paneID, func(cur state.PaneState) state.PaneState {
+		if !cur.LastNotified[c.as].Equal(c.at) {
+			return cur
+		}
+		delete(cur.LastNotified, c.as)
+		if len(cur.LastNotified) == 0 {
+			cur.LastNotified = nil
+		}
+		if c.turn != "" && cur.LastTurn[c.as] == c.turn {
+			if c.prevTurn == "" {
+				delete(cur.LastTurn, c.as)
+			} else {
+				cur.LastTurn[c.as] = c.prevTurn
+			}
+			if len(cur.LastTurn) == 0 {
+				cur.LastTurn = nil
 			}
 		}
-		if len(last) == 0 {
-			last = nil
+		if restoreStatus && cur.Status == c.status {
+			cur.Status = c.prevStatus
 		}
-		return state.PaneState{Status: prevStatus, LastNotified: last}
+		return cur
 	})
 }
 

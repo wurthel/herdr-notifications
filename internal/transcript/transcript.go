@@ -79,6 +79,60 @@ func Locate(agent, sessionID string, dirs Dirs) string {
 	return ""
 }
 
+const (
+	maxContinuations   = 8
+	continuationWindow = 64 << 10
+)
+
+// Resolve follows Claude Code's "continued-in" markers from the log at path
+// to the file the session now writes to. Claude Code can move a running
+// session to a new id while herdr keeps reporting the old one, which would
+// otherwise freeze notifications on the last turn of the abandoned file.
+func Resolve(agent, path string, dirs Dirs) string {
+	if agent != "claude" || path == "" {
+		return path
+	}
+	seen := map[string]bool{path: true}
+	for range maxContinuations {
+		id := continuedIn(path)
+		if id == "" {
+			return path
+		}
+		next := Locate(agent, id, Dirs{Claude: []string{filepath.Dir(filepath.Dir(path))}})
+		if next == "" {
+			next = Locate(agent, id, dirs)
+		}
+		if next == "" || seen[next] {
+			return path
+		}
+		seen[next] = true
+		path = next
+	}
+	return path
+}
+
+// continuedIn returns the session id from the last "continued-in" entry near
+// the end of a Claude Code log, or "".
+func continuedIn(path string) string {
+	lines, err := tailLines(path, continuationWindow)
+	if err != nil {
+		return ""
+	}
+	for i := len(lines) - 1; i >= 0; i-- {
+		if !bytes.Contains(lines[i], []byte(`"continued-in"`)) {
+			continue
+		}
+		var e struct {
+			Type string `json:"type"`
+			ID   string `json:"continuedInSessionId"`
+		}
+		if json.Unmarshal(lines[i], &e) == nil && e.Type == "continued-in" && e.ID != "" {
+			return e.ID
+		}
+	}
+	return ""
+}
+
 // Read parses the log at path in the format of the given agent.
 func Read(agent, path string) (Turn, error) {
 	lines, err := tailLines(path, maxTailBytes)

@@ -19,6 +19,8 @@ const (
 type PaneState struct {
 	Status       string               `json:"status"`
 	LastNotified map[string]time.Time `json:"last_notified,omitempty"`
+	// LastTurn holds a fingerprint of the transcript turn last sent per status.
+	LastTurn map[string]string `json:"last_turn,omitempty"`
 }
 
 type Store struct {

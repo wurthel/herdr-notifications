@@ -16,10 +16,12 @@ const (
 	DefaultAPIBase       = "https://api.telegram.org"
 	DefaultPaneTailLines = 15
 	DefaultDebounce      = 10 * time.Second
+	DefaultSettle        = time.Second
 	EnvFileName          = ".env"
 
 	maxPaneTailLines   = 200
 	maxDebounceSeconds = 24 * 60 * 60
+	maxSettleMS        = 10_000
 )
 
 var knownStatuses = map[string]bool{"idle": true, "working": true, "blocked": true, "done": true, "unknown": true}
@@ -32,11 +34,15 @@ type Config struct {
 	IdleAfterWorking bool
 	PaneTailLines    int
 	Debounce         time.Duration
-	Debug            bool
-	APIBase          string
-	ConfigDir        string
-	StateDir         string
-	HerdrBin         string
+	// Settle is how long to wait before confirming that a pane which went
+	// idle or done is still there, since herdr briefly reports idle between
+	// tool calls.
+	Settle    time.Duration
+	Debug     bool
+	APIBase   string
+	ConfigDir string
+	StateDir  string
+	HerdrBin  string
 	// Warnings lists non-fatal problems such as unknown NOTIFY_ON statuses.
 	Warnings []string
 }
@@ -113,6 +119,16 @@ func Load(getenv func(string) string) (Config, error) {
 		secs = maxDebounceSeconds
 	}
 	cfg.Debounce = time.Duration(secs) * time.Second
+
+	ms, err := parseInt(get("SETTLE_MS"), int(DefaultSettle/time.Millisecond))
+	if err != nil {
+		return cfg, fmt.Errorf("SETTLE_MS: %w", err)
+	}
+	if ms > maxSettleMS {
+		cfg.Warnings = append(cfg.Warnings, fmt.Sprintf("SETTLE_MS: %d capped at %d", ms, maxSettleMS))
+		ms = maxSettleMS
+	}
+	cfg.Settle = time.Duration(ms) * time.Millisecond
 	return cfg, nil
 }
 

@@ -71,6 +71,7 @@ func TestLoadDefaults(t *testing.T) {
 		PaneTailLines:    DefaultPaneTailLines,
 		IdleAfterWorking: true,
 		Debounce:         DefaultDebounce,
+		Settle:           DefaultSettle,
 		APIBase:          DefaultAPIBase,
 		StateDir:         filepath.Join(cacheDir, "herdr-notifications"),
 		HerdrBin:         "herdr",
@@ -88,6 +89,7 @@ func TestLoad(t *testing.T) {
 		"NOTIFY_ON= Done , BLOCKED,,idle ",
 		"PANE_TAIL_LINES=5",
 		"DEBOUNCE_SECONDS=30",
+		"SETTLE_MS=250",
 		"DEBUG=yes",
 		"TELEGRAM_API_BASE=http://file.test///",
 	}, "\n"))
@@ -108,6 +110,7 @@ func TestLoad(t *testing.T) {
 					PaneTailLines:    5,
 					IdleAfterWorking: true,
 					Debounce:         30 * time.Second,
+					Settle:           250 * time.Millisecond,
 					Debug:            true,
 					APIBase:          "http://file.test",
 					ConfigDir:        fileDir,
@@ -127,6 +130,7 @@ func TestLoad(t *testing.T) {
 				"NOTIFY_ON":               "Working",
 				"PANE_TAIL_LINES":         "0",
 				"DEBOUNCE_SECONDS":        "0",
+				"SETTLE_MS":               "0",
 				"DEBUG":                   "off",
 				"TELEGRAM_API_BASE":       "http://env.test/",
 			},
@@ -137,8 +141,8 @@ func TestLoad(t *testing.T) {
 				if !reflect.DeepEqual(c.NotifyOn, map[string]bool{"working": true}) {
 					t.Errorf("NotifyOn = %v", c.NotifyOn)
 				}
-				if c.PaneTailLines != 0 || c.Debounce != 0 || c.Debug {
-					t.Errorf("tail=%d debounce=%v debug=%v", c.PaneTailLines, c.Debounce, c.Debug)
+				if c.PaneTailLines != 0 || c.Debounce != 0 || c.Settle != 0 || c.Debug {
+					t.Errorf("tail=%d debounce=%v settle=%v debug=%v", c.PaneTailLines, c.Debounce, c.Settle, c.Debug)
 				}
 				if c.APIBase != "http://env.test" {
 					t.Errorf("APIBase = %q", c.APIBase)
@@ -198,6 +202,7 @@ func TestLoadErrors(t *testing.T) {
 		{"tail lines negative", map[string]string{"PANE_TAIL_LINES": "-1"}, "PANE_TAIL_LINES: must be >= 0"},
 		{"debounce not a number", map[string]string{"DEBOUNCE_SECONDS": "1.5"}, "DEBOUNCE_SECONDS"},
 		{"debounce negative", map[string]string{"DEBOUNCE_SECONDS": "-3"}, "DEBOUNCE_SECONDS: must be >= 0"},
+		{"settle not a number", map[string]string{"SETTLE_MS": "0.5"}, "SETTLE_MS"},
 		{"invalid in .env", map[string]string{"HERDR_PLUGIN_CONFIG_DIR": writeEnvFile(t, "PANE_TAIL_LINES=x")}, "PANE_TAIL_LINES"},
 		{".env is a directory", map[string]string{"HERDR_PLUGIN_CONFIG_DIR": dirEnv}, ".env"},
 	}
@@ -246,6 +251,7 @@ func TestLoadWarningsAndClamps(t *testing.T) {
 		"NOTIFY_ON":        "done,finished",
 		"PANE_TAIL_LINES":  "5000",
 		"DEBOUNCE_SECONDS": "999999999999",
+		"SETTLE_MS":        "60000",
 	}
 	cfg, err := Load(func(k string) string { return env[k] })
 	if err != nil {
@@ -257,8 +263,11 @@ func TestLoadWarningsAndClamps(t *testing.T) {
 	if cfg.Debounce != maxDebounceSeconds*time.Second {
 		t.Errorf("Debounce = %v, want %v", cfg.Debounce, maxDebounceSeconds*time.Second)
 	}
+	if cfg.Settle != maxSettleMS*time.Millisecond {
+		t.Errorf("Settle = %v, want %v", cfg.Settle, maxSettleMS*time.Millisecond)
+	}
 	joined := strings.Join(cfg.Warnings, "\n")
-	for _, want := range []string{`"finished"`, "PANE_TAIL_LINES", "DEBOUNCE_SECONDS"} {
+	for _, want := range []string{`"finished"`, "PANE_TAIL_LINES", "DEBOUNCE_SECONDS", "SETTLE_MS"} {
 		if !strings.Contains(joined, want) {
 			t.Errorf("warnings %q missing %s", cfg.Warnings, want)
 		}

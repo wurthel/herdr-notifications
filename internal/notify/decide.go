@@ -31,7 +31,8 @@ func Decide(prev state.PaneState, status string, now time.Time, r Rules) (state.
 		return prev, ""
 	}
 
-	next := state.PaneState{Status: status, LastNotified: prev.LastNotified}
+	next := prev
+	next.Status = status
 	if status == prev.Status {
 		return next, ""
 	}

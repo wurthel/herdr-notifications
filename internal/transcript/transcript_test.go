@@ -131,6 +131,61 @@ func TestLocateRejectsBadInput(t *testing.T) {
 	}
 }
 
+func continuedEntry(id string) obj {
+	return obj{"type": "continued-in", "sessionId": "x", "continuedInSessionId": id}
+}
+
+func TestResolveFollowsContinuation(t *testing.T) {
+	const (
+		id2 = "22222222-2222-2222-2222-222222222222"
+		id3 = "33333333-3333-3333-3333-333333333333"
+	)
+	root := t.TempDir()
+	proj := filepath.Join(root, "-work-proj")
+	first := filepath.Join(proj, testID+".jsonl")
+	writeJSONL(t, first, obj{"type": "user"}, continuedEntry(id2))
+	writeJSONL(t, filepath.Join(proj, id2+".jsonl"), obj{"type": "user"}, continuedEntry(id3))
+	last := filepath.Join(proj, id3+".jsonl")
+	writeJSONL(t, last, obj{"type": "user"})
+	dirs := Dirs{Claude: []string{root}}
+
+	if got := Resolve("claude", first, dirs); got != last {
+		t.Errorf("Resolve = %q, want %q", got, last)
+	}
+	if got := Resolve("claude", last, dirs); got != last {
+		t.Errorf("Resolve without marker = %q, want %q", got, last)
+	}
+	if got := Resolve("codex", first, dirs); got != first {
+		t.Errorf("Resolve(codex) = %q, want unchanged %q", got, first)
+	}
+}
+
+func TestResolveFallsBack(t *testing.T) {
+	const other = "44444444-4444-4444-4444-444444444444"
+	root := t.TempDir()
+	proj := filepath.Join(root, "p")
+	dirs := Dirs{Claude: []string{root}}
+
+	missing := filepath.Join(proj, testID+".jsonl")
+	writeJSONL(t, missing, obj{"type": "user"}, continuedEntry("55555555-5555-5555-5555-555555555555"))
+	if got := Resolve("claude", missing, dirs); got != missing {
+		t.Errorf("Resolve with missing target = %q, want %q", got, missing)
+	}
+
+	a := filepath.Join(proj, other+".jsonl")
+	writeJSONL(t, a, continuedEntry(testID))
+	writeJSONL(t, missing, continuedEntry(other))
+	if got := Resolve("claude", a, dirs); got != missing {
+		t.Errorf("Resolve on a cycle = %q, want %q", got, missing)
+	}
+
+	bad := filepath.Join(proj, "66666666-6666-6666-6666-666666666666.jsonl")
+	writeJSONL(t, bad, continuedEntry("../"+testID))
+	if got := Resolve("claude", bad, dirs); got != bad {
+		t.Errorf("Resolve with invalid id = %q, want %q", got, bad)
+	}
+}
+
 func TestDefaultDirs(t *testing.T) {
 	env := func(m map[string]string) func(string) string {
 		return func(k string) string { return m[k] }

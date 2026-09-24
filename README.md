@@ -85,6 +85,7 @@ To remove a linked plugin, run `make unlink`.
 | `PANE_TAIL_LINES` | `15` | Pane output lines to send when no agent transcript is available (max `200`). `0` disables this fallback. |
 | `NOTIFY_IDLE_AFTER_WORKING` | `1` | Treat `working → idle` as `done` (the agent finished in a visible pane). Needs `done` in `NOTIFY_ON`. `0` disables. |
 | `DEBOUNCE_SECONDS` | `10` | Minimum seconds between two messages for the same status on the same pane |
+| `SETTLE_MS` | `1000` | Before sending "finished", wait this long and re-read the pane's status. If the agent is working or blocked again, the event is dropped (max `10000`). `0` disables. |
 | `DEBUG` | `0` | `1`/`true` writes the latest event to `$HERDR_PLUGIN_STATE_DIR/debug/last-event.json` |
 | `TELEGRAM_API_BASE` | `https://api.telegram.org` | Bot API base URL, for tests or a self-hosted Bot API server |
 
@@ -99,6 +100,8 @@ herdr gives each pane one of these agent statuses: `idle`, `working`, `blocked`,
 - `done` means the agent went idle and you have **not seen it yet**. Agents in a background tab report `done`. If the pane is visible in an attached herdr client when the agent finishes (for example a split next to the one you are typing in), herdr treats it as seen and reports `idle` instead. Since you may have walked away with that split on screen, a direct `working → idle` transition is also reported as "finished" (`NOTIFY_IDLE_AFTER_WORKING=1`, the default). Merely looking at an already finished pane (`done → idle`) never sends anything.
 - A status only counts when it changes. herdr may send the same status more than once, and the plugin records each pane's last status so repeats are ignored.
 - Debounce works per status. For each pane, a status in `NOTIFY_ON` triggers at most one message every `DEBOUNCE_SECONDS`.
+- herdr can report `idle` for a fraction of a second while an agent starts a tool call. Before a "finished" message, the plugin waits `SETTLE_MS` and asks herdr for the pane's status again. If it is `working` or `blocked` by then, the event is ignored and not recorded.
+- A "finished" message built from the transcript is not sent again if its prompt and response match the previous "finished" message for that pane. Pane-output messages are not checked this way.
 - `unknown` is ignored and not recorded, so `done → unknown → done` counts as no change and never sends a second message.
 - If sending fails (network down, Telegram error), the notification is rolled back and the next event with the same status retries it.
 - Pane state is stored in `$HERDR_PLUGIN_STATE_DIR/panes/`, one small JSON file per pane, guarded by a `flock`. Files are not pruned; delete the directory at any time to reset.
@@ -125,6 +128,7 @@ command = "herdr-notifications.toggle"
 ## Troubleshooting
 
 - **No message arrives.** Run `herdr plugin log list --plugin herdr-notifications`. The event hook always exits 0 and writes errors (missing token, Telegram API errors, pane or transcript read failures) to stderr, which herdr saves in this log.
+- **Every message shows the same old prompt and response.** Claude Code sometimes moves a running session to a new session id, and herdr keeps reporting the old one. The plugin follows the `continued-in` marker Claude Code writes at the end of the old log. If the message is still stale, compare `agent_session.value` from `herdr pane get <pane>` with the newest log in `~/.claude/projects/<project>/`.
 - **Raw terminal output instead of prompt/response.** The agent is not Claude Code or Codex, or its session log was not found. Check `herdr pane get <pane>`: `agent_session.value` must match a log file name.
 - **Is the plugin loaded?** Run `herdr plugin list`.
 - **"No such file" or exec errors.** Hooks run inside the herdr server, which runs `./herdr-notifications` from the plugin root. That binary must exist there. For a linked checkout, run `make build`.

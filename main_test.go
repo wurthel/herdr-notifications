@@ -59,15 +59,22 @@ type harness struct {
 	env      map[string]string
 	tg       *fakeTelegram
 	argsFile string
-	clock    time.Time
-	stdout   bytes.Buffer
-	stderr   bytes.Buffer
-	sleeps   int
+	// statusFile holds the agent_status the fake `herdr pane get` reports.
+	statusFile string
+	clock      time.Time
+	stdout     bytes.Buffer
+	stderr     bytes.Buffer
+	sleeps     int
 }
 
 // writeClaudeTranscript stores JSONL entries where the plugin looks for the
 // test session's Claude Code transcript.
 func (h *harness) writeClaudeTranscript(entries ...map[string]any) {
+	h.t.Helper()
+	h.writeClaudeSession(testSessionID, entries...)
+}
+
+func (h *harness) writeClaudeSession(id string, entries ...map[string]any) {
 	h.t.Helper()
 	dir := filepath.Join(h.env["HOME"], ".claude", "projects", "-work-proj")
 	if err := os.MkdirAll(dir, 0o700); err != nil {
@@ -82,7 +89,7 @@ func (h *harness) writeClaudeTranscript(entries ...map[string]any) {
 		buf.Write(line)
 		buf.WriteByte('\n')
 	}
-	if err := os.WriteFile(filepath.Join(dir, testSessionID+".jsonl"), buf.Bytes(), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, id+".jsonl"), buf.Bytes(), 0o600); err != nil {
 		h.t.Fatal(err)
 	}
 }
@@ -100,7 +107,7 @@ const testSessionID = "sess-0001-test"
 const fakeHerdrScript = `#!/bin/sh
 printf '%%s\n' "$*" >> '%s'
 case "$1 $2" in
-"pane get") printf '{"result":{"pane":{"pane_id":"%%s","agent":"claude","agent_session":{"agent":"claude","kind":"id","value":"` + testSessionID + `"}}}}' "$3" ;;
+"pane get") printf '{"result":{"pane":{"pane_id":"%%s","agent":"claude","agent_status":"%%s","agent_session":{"agent":"claude","kind":"id","value":"` + testSessionID + `"}}}}' "$3" "$(cat '%s' 2>/dev/null)" ;;
 "pane read") printf '\033[32mcompiling\033[0m\nall <tests> & checks passed\r\n\n' ;;
 esac
 exit %d
@@ -110,10 +117,11 @@ func newHarness(t *testing.T) *harness {
 	t.Helper()
 	dir := t.TempDir()
 	h := &harness{
-		t:        t,
-		tg:       &fakeTelegram{},
-		argsFile: filepath.Join(dir, "herdr-args.log"),
-		clock:    time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC),
+		t:          t,
+		tg:         &fakeTelegram{},
+		argsFile:   filepath.Join(dir, "herdr-args.log"),
+		statusFile: filepath.Join(dir, "herdr-status"),
+		clock:      time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC),
 	}
 	srv := httptest.NewServer(h.tg)
 	t.Cleanup(srv.Close)
@@ -137,7 +145,7 @@ func newHarness(t *testing.T) *harness {
 func (h *harness) writeHerdr(dir string, exitCode int) string {
 	h.t.Helper()
 	path := filepath.Join(dir, fmt.Sprintf("herdr-%d", exitCode))
-	script := fmt.Sprintf(fakeHerdrScript, h.argsFile, exitCode)
+	script := fmt.Sprintf(fakeHerdrScript, h.argsFile, h.statusFile, exitCode)
 	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
 		h.t.Fatal(err)
 	}
@@ -164,6 +172,15 @@ func (h *harness) notify(status string) {
 		`"pane_id":"w1:p1","workspace_id":"w1","agent_status":%q,"agent":"claude","display_agent":"Claude Code","title":"fix bug"}}`, status)
 	if code := h.run("notify"); code != 0 {
 		h.t.Fatalf("notify exit code = %d, want 0", code)
+	}
+}
+
+// setPaneStatus sets the status herdr reports when the plugin re-reads the
+// pane; "" means herdr reports none.
+func (h *harness) setPaneStatus(status string) {
+	h.t.Helper()
+	if err := os.WriteFile(h.statusFile, []byte(status), 0o600); err != nil {
+		h.t.Fatal(err)
 	}
 }
 
@@ -282,8 +299,8 @@ func TestNotifyDoneWaitsForTranscriptFlush(t *testing.T) {
 	h.writeClaudeTranscript(userEntry("question without answer yet"))
 	h.notify("working")
 	h.notify("done")
-	if h.sleeps != 3 {
-		t.Errorf("sleeps = %d, want 3 retries", h.sleeps)
+	if h.sleeps != 4 {
+		t.Errorf("sleeps = %d, want 1 settle + 3 retries", h.sleeps)
 	}
 	msgs := h.tg.messages()
 	if len(msgs) != 1 || !strings.Contains(msgs[0].Text, "question without answer yet") {
@@ -320,6 +337,136 @@ func TestNotifySequence(t *testing.T) {
 				t.Errorf("sent %d messages, want %d", n, tt.wantSent)
 			}
 		})
+	}
+}
+
+func TestNotifyIgnoresIdleFlicker(t *testing.T) {
+	h := newHarness(t)
+	h.env["PANE_TAIL_LINES"] = "0"
+	h.notify("working")
+	// herdr reports idle as a tool call starts but is back to working by the
+	// time the plugin re-reads the pane.
+	h.setPaneStatus("working")
+	h.notify("idle")
+	h.notify("working")
+	if n := len(h.tg.messages()); n != 0 {
+		t.Fatalf("flicker sent %d messages, want 0", n)
+	}
+	if h.sleeps != 1 {
+		t.Errorf("sleeps = %d, want 1 settle wait", h.sleeps)
+	}
+
+	// The real finish shortly after is neither dropped nor debounced.
+	h.clock = h.clock.Add(2 * time.Second)
+	h.setPaneStatus("idle")
+	h.notify("idle")
+	msgs := h.tg.messages()
+	if len(msgs) != 1 || !strings.Contains(msgs[0].Text, "finished") {
+		t.Fatalf("messages = %+v, want one \"finished\" message", msgs)
+	}
+}
+
+func TestNotifySettleDisabled(t *testing.T) {
+	h := newHarness(t)
+	h.env["PANE_TAIL_LINES"] = "0"
+	h.env["SETTLE_MS"] = "0"
+	h.setPaneStatus("working")
+	h.notify("working")
+	h.notify("idle")
+	if n := len(h.tg.messages()); n != 1 {
+		t.Errorf("sent %d messages, want 1 without settle check", n)
+	}
+	if h.sleeps != 0 {
+		t.Errorf("sleeps = %d, want 0", h.sleeps)
+	}
+}
+
+func TestNotifySkipsRepeatedTurn(t *testing.T) {
+	h := newHarness(t)
+	h.writeClaudeTranscript(userEntry("run the sweep"), assistantEntry("m1", map[string]any{"type": "text", "text": "Sweep done."}))
+	for range 2 {
+		h.notify("working")
+		h.notify("done")
+		h.clock = h.clock.Add(time.Minute)
+	}
+	if n := len(h.tg.messages()); n != 1 {
+		t.Fatalf("same turn sent %d times, want 1", n)
+	}
+
+	h.writeClaudeTranscript(userEntry("run the sweep"), assistantEntry("m2", map[string]any{"type": "text", "text": "Second sweep done."}))
+	h.notify("working")
+	h.notify("done")
+	msgs := h.tg.messages()
+	if len(msgs) != 2 || !strings.Contains(msgs[1].Text, "Second sweep done.") {
+		t.Fatalf("messages = %+v, want the new turn", msgs)
+	}
+}
+
+func TestNotifyRepeatedTurnDoesNotDebounceNextOne(t *testing.T) {
+	h := newHarness(t)
+	h.writeClaudeTranscript(userEntry("q"), assistantEntry("m1", map[string]any{"type": "text", "text": "a1"}))
+	h.notify("working")
+	h.notify("done")
+	h.clock = h.clock.Add(time.Minute)
+	h.notify("working")
+	h.notify("done") // duplicate, skipped
+	h.writeClaudeTranscript(userEntry("q"), assistantEntry("m2", map[string]any{"type": "text", "text": "a2"}))
+	h.clock = h.clock.Add(time.Second)
+	h.notify("working")
+	h.notify("done")
+	if n := len(h.tg.messages()); n != 2 {
+		t.Errorf("sent %d messages, want 2", n)
+	}
+}
+
+func TestNotifyBlockedNotDeduplicated(t *testing.T) {
+	h := newHarness(t)
+	h.writeClaudeTranscript(
+		userEntry("clean up"),
+		assistantEntry("m1", map[string]any{"type": "tool_use", "id": "t1", "name": "Bash", "input": map[string]any{"command": "rm -rf build"}}),
+	)
+	for range 2 {
+		h.notify("working")
+		h.notify("blocked")
+		h.clock = h.clock.Add(time.Minute)
+	}
+	if n := len(h.tg.messages()); n != 2 {
+		t.Errorf("sent %d blocked messages, want 2", n)
+	}
+}
+
+func TestNotifyFollowsContinuedSession(t *testing.T) {
+	const newID = "sess-0002-test"
+	h := newHarness(t)
+	h.writeClaudeTranscript(
+		userEntry("old question"),
+		assistantEntry("m0", map[string]any{"type": "text", "text": "old answer"}),
+		map[string]any{"type": "continued-in", "sessionId": testSessionID, "continuedInSessionId": newID},
+	)
+	h.writeClaudeSession(newID,
+		userEntry("old question"),
+		assistantEntry("m0", map[string]any{"type": "text", "text": "old answer"}),
+		userEntry("new question"),
+		assistantEntry("m1", map[string]any{"type": "text", "text": "new answer"}),
+	)
+	h.notify("working")
+	h.notify("done")
+	msgs := h.tg.messages()
+	if len(msgs) != 1 || !strings.Contains(msgs[0].Text, "new answer") || strings.Contains(msgs[0].Text, "old answer") {
+		t.Fatalf("messages = %+v, want the continued session's turn", msgs)
+	}
+}
+
+func TestNotifySendFailureKeepsTurnUnsent(t *testing.T) {
+	h := newHarness(t)
+	h.writeClaudeTranscript(userEntry("q"), assistantEntry("m1", map[string]any{"type": "text", "text": "a1"}))
+	h.tg.fail = 1
+	h.notify("working")
+	h.notify("done")
+	h.clock = h.clock.Add(time.Second)
+	h.notify("done")
+	if n := len(h.tg.messages()); n != 1 {
+		t.Errorf("sent %d messages, want the failed turn retried once", n)
 	}
 }
 

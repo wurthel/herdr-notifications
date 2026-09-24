@@ -27,6 +27,7 @@ func (c CLI) ReadTail(ctx context.Context, paneID string, lines int) (string, er
 type Pane struct {
 	PaneID       string `json:"pane_id"`
 	Agent        string `json:"agent"`
+	AgentStatus  string `json:"agent_status"`
 	Cwd          string `json:"cwd"`
 	AgentSession struct {
 		Agent string `json:"agent"`

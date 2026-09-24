@@ -1,6 +1,8 @@
 package notify
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"html"
 	"regexp"
 	"strings"
@@ -44,6 +46,20 @@ func (m Message) HasTurn() bool {
 		return true
 	}
 	return m.Status == "blocked" && strings.TrimSpace(m.Pending) != ""
+}
+
+// Fingerprint identifies the transcript content the message shows, or ""
+// when it has none, so a turn that was already sent can be recognised.
+func (m Message) Fingerprint() string {
+	if !m.HasTurn() {
+		return ""
+	}
+	pending := ""
+	if m.Status == "blocked" {
+		pending = strings.TrimSpace(m.Pending)
+	}
+	sum := sha256.Sum256([]byte(strings.TrimSpace(m.Prompt) + "\x00" + strings.TrimSpace(m.Output) + "\x00" + pending))
+	return hex.EncodeToString(sum[:16])
 }
 
 var ansiRE = regexp.MustCompile(
