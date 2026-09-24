@@ -1,0 +1,23 @@
+id = "herdr-notifications"
+name = "Herdr Notifications"
+version = "0.1.0"
+min_herdr_version = "0.9.1"
+description = "Telegram notifications when an agent finishes or needs input."
+platforms = ["linux", "macos"]
+
+[[build]]
+command = ["go", "build", "-trimpath", "-ldflags=-s -w", "-o", "herdr-notifications", "."]
+
+[[events]]
+on = "pane.agent_status_changed"
+command = ["./herdr-notifications", "notify"]
+
+[[actions]]
+id = "test"
+title = "Telegram: send test notification"
+command = ["./herdr-notifications", "test"]
+
+[[actions]]
+id = "toggle"
+title = "Telegram: toggle notifications"
+command = ["./herdr-notifications", "toggle"]
