@@ -26,7 +26,7 @@ Line 1 is `✅ <agent> finished` or `⏸ <agent> needs input`. Line 2 shows the 
 From GitHub:
 
 ```sh
-herdr plugin install vusalsalmanov/herdr-notifications
+herdr plugin install wurthel/herdr-notifications
 ```
 
 herdr runs the manifest's `[[build]]` step (`go build ...`) and puts the `herdr-notifications` binary in the plugin root.
@@ -34,7 +34,7 @@ herdr runs the manifest's `[[build]]` step (`go build ...`) and puts the `herdr-
 For local development:
 
 ```sh
-git clone https://github.com/vusalsalmanov/herdr-notifications
+git clone https://github.com/wurthel/herdr-notifications
 cd herdr-notifications
 make link      # builds the binary, then runs `herdr plugin link .`
 ```

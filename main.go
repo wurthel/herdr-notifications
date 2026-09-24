@@ -13,12 +13,12 @@ import (
 	"strings"
 	"time"
 
-	"github.com/vusalsalmanov/herdr-notifications/internal/config"
-	"github.com/vusalsalmanov/herdr-notifications/internal/event"
-	"github.com/vusalsalmanov/herdr-notifications/internal/herdr"
-	"github.com/vusalsalmanov/herdr-notifications/internal/notify"
-	"github.com/vusalsalmanov/herdr-notifications/internal/state"
-	"github.com/vusalsalmanov/herdr-notifications/internal/telegram"
+	"github.com/wurthel/herdr-notifications/internal/config"
+	"github.com/wurthel/herdr-notifications/internal/event"
+	"github.com/wurthel/herdr-notifications/internal/herdr"
+	"github.com/wurthel/herdr-notifications/internal/notify"
+	"github.com/wurthel/herdr-notifications/internal/state"
+	"github.com/wurthel/herdr-notifications/internal/telegram"
 )
 
 const usage = "usage: herdr-notifications [notify|test|toggle]"

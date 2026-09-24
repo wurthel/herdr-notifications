@@ -3,7 +3,7 @@ package notify
 import (
 	"time"
 
-	"github.com/vusalsalmanov/herdr-notifications/internal/state"
+	"github.com/wurthel/herdr-notifications/internal/state"
 )
 
 const (

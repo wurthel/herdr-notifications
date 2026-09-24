@@ -1,3 +1,3 @@
-module github.com/vusalsalmanov/herdr-notifications
+module github.com/wurthel/herdr-notifications
 
 go 1.23
