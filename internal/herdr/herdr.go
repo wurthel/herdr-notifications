@@ -29,6 +29,7 @@ type Pane struct {
 	Agent        string `json:"agent"`
 	AgentStatus  string `json:"agent_status"`
 	Cwd          string `json:"cwd"`
+	Focused      bool   `json:"focused"`
 	AgentSession struct {
 		Agent string `json:"agent"`
 		Kind  string `json:"kind"`

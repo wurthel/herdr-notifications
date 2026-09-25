@@ -83,7 +83,7 @@ To remove a linked plugin, run `make unlink`.
 | `TELEGRAM_CHAT_ID` | (required) | Chat to send messages to |
 | `NOTIFY_ON` | `done,blocked` | Comma-separated statuses that trigger a message: `idle`, `working`, `blocked`, `done` |
 | `PANE_TAIL_LINES` | `15` | Pane output lines to send when no agent transcript is available (max `200`). `0` disables this fallback. |
-| `NOTIFY_IDLE_AFTER_WORKING` | `1` | Treat `working → idle` as `done` (the agent finished in a visible pane). Needs `done` in `NOTIFY_ON`. `0` disables. |
+| `NOTIFY_IDLE_AFTER_WORKING` | `1` | Treat `working → idle` as `done` (the agent finished in a visible pane that is not focused). Needs `done` in `NOTIFY_ON`. `0` disables. |
 | `DEBOUNCE_SECONDS` | `10` | Minimum seconds between two messages for the same status on the same pane |
 | `SETTLE_MS` | `1000` | Before sending "finished", wait this long and re-read the pane's status. If the agent is working or blocked again, the event is dropped (max `10000`). `0` disables. |
 | `DEBUG` | `0` | `1`/`true` writes the latest event to `$HERDR_PLUGIN_STATE_DIR/debug/last-event.json` |
@@ -97,7 +97,7 @@ Never commit your token. `.env` is already in `.gitignore`.
 
 herdr gives each pane one of these agent statuses: `idle`, `working`, `blocked`, `done` or `unknown`. On every `pane.agent_status_changed` event, the plugin runs `./herdr-notifications notify` and applies these rules:
 
-- `done` means the agent went idle and you have **not seen it yet**. Agents in a background tab report `done`. If the pane is visible in an attached herdr client when the agent finishes (for example a split next to the one you are typing in), herdr treats it as seen and reports `idle` instead. Since you may have walked away with that split on screen, a direct `working → idle` transition is also reported as "finished" (`NOTIFY_IDLE_AFTER_WORKING=1`, the default). Merely looking at an already finished pane (`done → idle`) never sends anything.
+- `done` means the agent went idle and you have **not seen it yet**. Agents in a background tab report `done`. If the pane is visible in an attached herdr client when the agent finishes (for example a split next to the one you are typing in), herdr treats it as seen and reports `idle` instead. Since you may have walked away with that split on screen, a direct `working → idle` transition is also reported as "finished" (`NOTIFY_IDLE_AFTER_WORKING=1`, the default), unless the pane is herdr's focused pane, since then you are working in it. Merely looking at an already finished pane (`done → idle`) never sends anything.
 - A status only counts when it changes. herdr may send the same status more than once, and the plugin records each pane's last status so repeats are ignored.
 - Debounce works per status. For each pane, a status in `NOTIFY_ON` triggers at most one message every `DEBOUNCE_SECONDS`.
 - herdr can report `idle` for a fraction of a second while an agent starts a tool call. Before a "finished" message, the plugin waits `SETTLE_MS` and asks herdr for the pane's status again. If it is `working` or `blocked` by then, the event is ignored and not recorded.

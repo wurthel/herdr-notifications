@@ -110,15 +110,22 @@ func (a app) notify(ctx context.Context) error {
 		paneErr  error
 		havePane bool
 	)
-	// herdr can report idle for a moment when a tool call starts. Waiting
-	// outside the state lock lets the following "working" event land first,
-	// and the re-read status then shows the idle was not a real finish.
-	if cfg.Settle > 0 && mayFinish(info.Status, rules) {
-		a.sleep(cfg.Settle)
+	if mayFinish(info.Status, rules) {
+		// herdr can report idle for a moment when a tool call starts. Waiting
+		// outside the state lock lets the following "working" event land first,
+		// and the re-read status then shows the idle was not a real finish.
+		if cfg.Settle > 0 {
+			a.sleep(cfg.Settle)
+		}
 		pane, paneErr = cli.PaneInfo(ctx, info.PaneID)
 		havePane = true
-		if paneErr == nil && busy(pane.AgentStatus) {
+		if cfg.Settle > 0 && paneErr == nil && busy(pane.AgentStatus) {
 			return nil
+		}
+		// herdr reports idle rather than done when the pane was on screen; if
+		// it is also the focused pane, the user is working in it.
+		if paneErr == nil && pane.Focused {
+			rules.IdleAfterWorking = false
 		}
 	}
 

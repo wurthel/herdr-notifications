@@ -61,10 +61,12 @@ type harness struct {
 	argsFile string
 	// statusFile holds the agent_status the fake `herdr pane get` reports.
 	statusFile string
-	clock      time.Time
-	stdout     bytes.Buffer
-	stderr     bytes.Buffer
-	sleeps     int
+	// focusedFile holds "true" when the fake `herdr pane get` reports the pane focused.
+	focusedFile string
+	clock       time.Time
+	stdout      bytes.Buffer
+	stderr      bytes.Buffer
+	sleeps      int
 }
 
 // writeClaudeTranscript stores JSONL entries where the plugin looks for the
@@ -107,7 +109,7 @@ const testSessionID = "sess-0001-test"
 const fakeHerdrScript = `#!/bin/sh
 printf '%%s\n' "$*" >> '%s'
 case "$1 $2" in
-"pane get") printf '{"result":{"pane":{"pane_id":"%%s","agent":"claude","agent_status":"%%s","agent_session":{"agent":"claude","kind":"id","value":"` + testSessionID + `"}}}}' "$3" "$(cat '%s' 2>/dev/null)" ;;
+"pane get") printf '{"result":{"pane":{"pane_id":"%%s","agent":"claude","agent_status":"%%s","focused":%%s,"agent_session":{"agent":"claude","kind":"id","value":"` + testSessionID + `"}}}}' "$3" "$(cat '%s' 2>/dev/null)" "$(cat '%s' 2>/dev/null || echo false)" ;;
 "pane read") printf '\033[32mcompiling\033[0m\nall <tests> & checks passed\r\n\n' ;;
 esac
 exit %d
@@ -117,11 +119,12 @@ func newHarness(t *testing.T) *harness {
 	t.Helper()
 	dir := t.TempDir()
 	h := &harness{
-		t:          t,
-		tg:         &fakeTelegram{},
-		argsFile:   filepath.Join(dir, "herdr-args.log"),
-		statusFile: filepath.Join(dir, "herdr-status"),
-		clock:      time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC),
+		t:           t,
+		tg:          &fakeTelegram{},
+		argsFile:    filepath.Join(dir, "herdr-args.log"),
+		statusFile:  filepath.Join(dir, "herdr-status"),
+		focusedFile: filepath.Join(dir, "herdr-focused"),
+		clock:       time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC),
 	}
 	srv := httptest.NewServer(h.tg)
 	t.Cleanup(srv.Close)
@@ -145,7 +148,7 @@ func newHarness(t *testing.T) *harness {
 func (h *harness) writeHerdr(dir string, exitCode int) string {
 	h.t.Helper()
 	path := filepath.Join(dir, fmt.Sprintf("herdr-%d", exitCode))
-	script := fmt.Sprintf(fakeHerdrScript, h.argsFile, h.statusFile, exitCode)
+	script := fmt.Sprintf(fakeHerdrScript, h.argsFile, h.statusFile, h.focusedFile, exitCode)
 	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
 		h.t.Fatal(err)
 	}
@@ -510,6 +513,31 @@ func TestNotifyIdleAfterWorking(t *testing.T) {
 	h.notify("idle")
 	if n := len(h.tg.messages()); n != 0 {
 		t.Errorf("sent %d messages with rule disabled, want 0", n)
+	}
+}
+
+func TestNotifyIdleAfterWorkingSkipsFocusedPane(t *testing.T) {
+	h := newHarness(t)
+	h.env["PANE_TAIL_LINES"] = "0"
+	if err := os.WriteFile(h.focusedFile, []byte("true"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	h.notify("working")
+	h.notify("idle")
+	if n := len(h.tg.messages()); n != 0 {
+		t.Fatalf("focused pane sent %d messages, want 0", n)
+	}
+
+	// A later real finish in a background tab still notifies.
+	if err := os.WriteFile(h.focusedFile, []byte("false"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	h.clock = h.clock.Add(time.Second)
+	h.notify("working")
+	h.notify("done")
+	msgs := h.tg.messages()
+	if len(msgs) != 1 || !strings.Contains(msgs[0].Text, "finished") {
+		t.Fatalf("messages = %+v, want one \"finished\" message", msgs)
 	}
 }
 
